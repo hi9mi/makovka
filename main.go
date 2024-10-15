@@ -13,9 +13,9 @@ import (
 )
 
 var (
-	Token              string
+	token              string
 	floodChannelID     string
-	defaultDelay       = time.Hour * 24
+	defaultDelay       = time.Second * 24
 	customMessageDelay time.Duration
 	adminRoleID        string
 )
@@ -27,18 +27,18 @@ func init() {
 		return
 	}
 
-	Token = os.Getenv("DISCORD_BOT_TOKEN")
+	token = os.Getenv("DISCORD_BOT_TOKEN")
 	floodChannelID = os.Getenv("DISCORD_FLOOD_CHANNEL_ID")
-	adminRoleID = os.Getenv("ADMIN_ROLE_ID")
+	adminRoleID = os.Getenv("DISCORD_ADMIN_ROLE")
 }
 
 func main() {
-	if Token == "" || floodChannelID == "" {
+	if token == "" || floodChannelID == "" {
 		fmt.Println("Environment variables DISCORD_BOT_TOKEN or DISCORD_FLOOD_CHANNEL_ID not set")
 		return
 	}
 
-	dg, err := discordgo.New(fmt.Sprintf("Bot %s", Token))
+	dg, err := discordgo.New(fmt.Sprintf("Bot %s", token))
 	if err != nil {
 		fmt.Println("Error creating Discord session,", err)
 		return
@@ -61,10 +61,6 @@ func main() {
 }
 
 func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
-	if m.Author.ID == s.State.User.ID {
-		return
-	}
-
 	handleCommand(s, m)
 	if m.ChannelID == floodChannelID {
 		handleMessageDeletion(s, m)
@@ -72,31 +68,39 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 }
 
 func handleCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
-	content := m.Content
-	channelID := m.ChannelID
-	fmt.Println(content)
-	fmt.Print(content, "Hello")
-	if strings.HasPrefix(content, "!setdelay") {
-		parts := strings.Split(content, " ")
-		fmt.Println(parts)
-		if len(parts) != 2 {
-			s.ChannelMessageSend(channelID, "Usage: !setdelay <time>")
-			return
-		}
-
-		delayDuration, err := time.ParseDuration(parts[1])
-		if err != nil {
-			s.ChannelMessageSend(channelID, "Invalid time format. Use something like '10m', '1h', etc.")
-			return
-		}
-
-		if !isUserAdmin(s, m) {
-			s.ChannelMessageSend(channelID, "You do not have permission to set the delay.")
-			return
-		}
-
-		setMessageDelay(s, delayDuration)
+	if isBotAuthorMessage(s, m) {
+		return
 	}
+
+	const prefix = "!"
+
+	if !strings.HasPrefix(m.Content, prefix) {
+		return
+	}
+
+	content := strings.TrimPrefix(m.Content, prefix)
+	args := strings.Fields(content)
+
+	if len(args) == 0 {
+		return
+	}
+
+	command := args[0]
+	args = args[1:]
+
+	switch command {
+	case "ping":
+		s.ChannelMessageSend(m.ChannelID, "Pong!")
+	case "setdelay":
+		handleSetMessageDelay(s, m, args)
+	default:
+		s.ChannelMessageSendReply(m.ChannelID, "Unknown command", &discordgo.MessageReference{
+			MessageID: m.ID,
+			ChannelID: m.ChannelID,
+			GuildID:   m.GuildID,
+		})
+	}
+
 }
 
 func setMessageDelay(s *discordgo.Session, delay time.Duration) {
@@ -104,19 +108,51 @@ func setMessageDelay(s *discordgo.Session, delay time.Duration) {
 	s.ChannelMessageSend(floodChannelID, fmt.Sprintf("Message deletion delay set to %s", delay))
 }
 
+func handleSetMessageDelay(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
+	if !isUserAdmin(s, m) {
+		s.ChannelMessageSendReply(m.ChannelID, "You must be an admin to use this command", &discordgo.MessageReference{
+			MessageID: m.ID,
+			ChannelID: m.ChannelID,
+			GuildID:   m.GuildID,
+		})
+	}
+	if len(args) == 0 {
+		s.ChannelMessageSendReply(m.ChannelID, "Usage: !setdelay <time>", &discordgo.MessageReference{
+			MessageID: m.ID,
+			ChannelID: m.ChannelID,
+			GuildID:   m.GuildID,
+		})
+		return
+	}
+
+	delay, err := time.ParseDuration(args[0])
+	if err != nil {
+		fmt.Println("Failed to parse duration:", err)
+		s.ChannelMessageSendReply(m.ChannelID, "Invalid time format. Use something like '10m', '1h', etc.", &discordgo.MessageReference{
+			MessageID: m.ID,
+			ChannelID: m.ChannelID,
+			GuildID:   m.GuildID,
+		})
+		return
+	}
+	setMessageDelay(s, delay)
+}
+
 func handleMessageDeletion(s *discordgo.Session, m *discordgo.MessageCreate) {
 	delay := getMessageDelay()
-	go func(messageID string) {
+
+	go func() {
 		time.Sleep(delay)
-		err := s.ChannelMessageDelete(floodChannelID, messageID)
+		err := s.ChannelMessageDelete(m.ChannelID, m.ID)
 		if err != nil {
 			fmt.Println("Failed to delete message:", err)
 		}
-	}(m.ID)
+	}()
 }
 
 func getMessageDelay() time.Duration {
 	if customMessageDelay > 0 {
+		fmt.Println("Using custom message delay")
 		return customMessageDelay
 	}
 	return defaultDelay
@@ -135,4 +171,8 @@ func isUserAdmin(s *discordgo.Session, m *discordgo.MessageCreate) bool {
 		}
 	}
 	return false
+}
+
+func isBotAuthorMessage(s *discordgo.Session, m *discordgo.MessageCreate) bool {
+	return m.Author.ID == s.State.User.ID
 }
